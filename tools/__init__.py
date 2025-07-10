@@ -1,0 +1,1 @@
+from .wiki_tool import ToolSearch
