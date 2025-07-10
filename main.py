@@ -14,21 +14,22 @@ from langchain_openai import ChatOpenAI
 from fastapi.middleware.cors import CORSMiddleware
 
 from database import QdrantVT
+from database.chat_history import ChatHistoryManager
 from router import QueryRouter
 from tools import ToolSearch
 
 from typing_extensions import TypedDict
 from typing import List
 
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Form
 from pydantic import BaseModel
 from typing import Optional
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi import HTTPException, Request, Form
 
 from pprint import pprint
 from database.create_docs import extract_text_from_pdf, LawDocumentCreator
+import os
 
 app = FastAPI()
 
@@ -48,6 +49,16 @@ FAST_EMBED_SPARSE_MODEL = "Qdrant/bm42-all-minilm-l6-v2-attentions"
 LLM_MODEL = "sonar-pro"
 COLLECTION_NAME = "law_collection"
 VN_LAW_PDF_PATH = "VanBanGoc_52.2014.QH13.pdf"
+
+### Khởi tạo Chat History Manager ###
+DB_CONFIG = {
+    "host": os.getenv("DB_HOST", "localhost"),
+    "user": os.getenv("DB_USER", "root"),
+    "password": os.getenv("DB_PASSWORD", "hoangducdung"),
+    "database": os.getenv("DB_NAME", "law_db")
+}
+
+chat_history_manager = ChatHistoryManager(**DB_CONFIG)
 
 ### Khởi tạo các đối tượng ###
 embeddings = HuggingFaceEmbeddings(model_name=HUGGINGFACE_MODEL)
@@ -82,13 +93,13 @@ rerank_retriever = ContextualCompressionRetriever(
 ### FUNCTIONS ###
 class GraphState(TypedDict):
     """
-    Trạng thái của đồ thị
+    Trạng thái của đồ thị
 
     Attributes:
-        question: câu hỏi
+        question: câu hỏi
         generation: LLM generation
-        documents: danh sách các văn bản
-        answer: câu trả lời
+        documents: danh sách các văn bản
+        answer: câu trả lời
     """
     question: str
     instruction: str
@@ -169,6 +180,7 @@ def preprocess_query(state):
     return {
         "instruction": response.content
     }
+
 def chatbot(state):
     # Prompt cải tiến cho tác vụ RAG
     prompt = f"""
@@ -189,7 +201,7 @@ def chatbot(state):
     response = llm.invoke(prompt)
     
     return {
-        "answer": [response]
+        "answer": response.content
     }
 
 
@@ -229,46 +241,212 @@ except Exception as e:
     print(f"\nKhông thể tạo đồ thị: {str(e)}")
 
 
-# endpoitn
+# Pydantic models
+class UserCreate(BaseModel):
+    username: str
+    email: Optional[str] = None
+
+class SessionCreate(BaseModel):
+    user_id: str
+    title: Optional[str] = "New Chat"
+
 class QuestionInput(BaseModel):
     user_id: str
+    session_id: Optional[str] = None
     question: str
 
+class SessionUpdate(BaseModel):
+    title: str
+
+class MessageSearch(BaseModel):
+    user_id: str
+    query: str
+
+# User Management Endpoints
+@app.post("/api/users")
+async def create_user(user: UserCreate):
+    """Tạo user mới"""
+    try:
+        user_id = chat_history_manager.create_user(user.username, user.email)
+        if user_id:
+            return {"status": "success", "user_id": user_id}
+        else:
+            raise HTTPException(status_code=400, detail="Không thể tạo user")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/users/{username}")
+async def get_user(username: str):
+    """Lấy thông tin user theo username"""
+    try:
+        user = chat_history_manager.get_user_by_username(username)
+        if user:
+            return {"status": "success", "user": user}
+        else:
+            raise HTTPException(status_code=404, detail="User không tồn tại")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Session Management Endpoints
+@app.post("/api/sessions")
+async def create_session(session: SessionCreate):
+    """Tạo session mới"""
+    try:
+        session_id = chat_history_manager.create_session(session.user_id, session.title)
+        if session_id:
+            return {"status": "success", "session_id": session_id}
+        else:
+            raise HTTPException(status_code=400, detail="Không thể tạo session")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/users/{user_id}/sessions")
+async def get_user_sessions(user_id: str, limit: int = 50):
+    """Lấy danh sách sessions của user"""
+    try:
+        sessions = chat_history_manager.get_user_sessions(user_id, limit)
+        return {"status": "success", "sessions": sessions}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/sessions/{session_id}/messages")
+async def get_session_messages(session_id: str, limit: int = 100):
+    """Lấy messages của session"""
+    try:
+        messages = chat_history_manager.get_session_messages(session_id, limit)
+        return {"status": "success", "messages": messages}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/sessions/{session_id}")
+async def update_session(session_id: str, session_update: SessionUpdate):
+    """Cập nhật title session"""
+    try:
+        success = chat_history_manager.update_session_title(session_id, session_update.title)
+        if success:
+            return {"status": "success", "message": "Session updated successfully"}
+        else:
+            raise HTTPException(status_code=400, detail="Không thể cập nhật session")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/sessions/{session_id}")
+async def delete_session(session_id: str):
+    """Xóa session"""
+    try:
+        success = chat_history_manager.delete_session(session_id)
+        if success:
+            return {"status": "success", "message": "Session deleted successfully"}
+        else:
+            raise HTTPException(status_code=400, detail="Không thể xóa session")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Chat Endpoints
 @app.post("/api/chat")
 async def chat(inputs: QuestionInput):
-    # results = []
-    
-    # # Giả sử bạn đã có `app.stream()` cho phép lấy các output từ câu hỏi.
-    # for output in graph.invoke({"question": inputs.question}):
-    #     output_result = {}
-    #     for key, value in output.items():
-    #         output_result[key] = value
-    #     results.append(output_result)
-    results = graph.invoke({"question": inputs.question})
-    answer = results.get('answer','')
-    #save_chat_history(inputs.user_id, inputs.question, answer)
-    return {"results": results}
+    """Chat với bot và lưu lịch sử"""
+    try:
+        # Nếu không có session_id, tạo session mới
+        session_id = inputs.session_id
+        if not session_id:
+            session_id = chat_history_manager.create_session(inputs.user_id, "New Chat")
+            if not session_id:
+                raise HTTPException(status_code=400, detail="Không thể tạo session")
+        
+        # Lưu câu hỏi của user
+        user_message_id = chat_history_manager.add_message(
+            session_id, "user", inputs.question
+        )
+        
+        # Xử lý câu hỏi với graph
+        results = graph.invoke({"question": inputs.question})
+        answer = results.get('answer', '')
+        
+        # Lưu câu trả lời của assistant
+        assistant_message_id = chat_history_manager.add_message(
+            session_id, "assistant", answer, 
+            metadata={"processing_results": results}
+        )
+        
+        # Tự động cập nhật title session nếu đây là tin nhắn đầu tiên
+        session_messages = chat_history_manager.get_session_messages(session_id, 5)
+        if len(session_messages) == 2:  # Chỉ có 2 tin nhắn (user + assistant)
+            # Tạo title ngắn gọn từ câu hỏi
+            title = inputs.question[:50] + "..." if len(inputs.question) > 50 else inputs.question
+            chat_history_manager.update_session_title(session_id, title)
+        
+        return {
+            "status": "success",
+            "session_id": session_id,
+            "answer": answer,
+            "user_message_id": user_message_id,
+            "assistant_message_id": assistant_message_id,
+            "results": results
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/sessions/{session_id}/context")
+async def get_conversation_context(session_id: str, last_n_messages: int = 10):
+    """Lấy context conversation"""
+    try:
+        context = chat_history_manager.get_conversation_context(session_id, last_n_messages)
+        return {"status": "success", "context": context}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/sessions/{session_id}/statistics")
+async def get_session_statistics(session_id: str):
+    """Lấy thống kê session"""
+    try:
+        stats = chat_history_manager.get_session_statistics(session_id)
+        return {"status": "success", "statistics": stats}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Search Endpoints
+@app.post("/api/search/messages")
+async def search_messages(search: MessageSearch):
+    """Tìm kiếm messages"""
+    try:
+        messages = chat_history_manager.search_messages(search.user_id, search.query)
+        return {"status": "success", "messages": messages}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/api/upload_pdf")
 async def upload_pdf(file: UploadFile = File(...)):
-    # Lưu file tạm thời
-    file_location = f"temp_{file.filename}"
-    with open(file_location, "wb") as f:
-        f.write(await file.read())
-    # 1. Trích xuất text
-    raw_text = extract_text_from_pdf(file_location)
-    # 2. Khởi tạo class thao tác DB
-    db_config = {
-        "host": "localhost",
-        "user": "root",
-        "password": "hoangducdung",
-        "database": "law_db"
-    }
-    doc_creator = LawDocumentCreator(**db_config)
-    # 3. Lưu vào MySQL
-    doc_creator.add_chapters_and_articles_to_db(raw_text)
-    # 4. Tạo Document từ MySQL
-    documents = doc_creator.create_documents_from_db()
-    # 5. Upsert vào Qdrant
-    qdrant_vectors.upsert_documents(documents)
-    return {"status": "success", "filename": file.filename}
+    """Upload và xử lý PDF"""
+    try:
+        file_location = f"temp_{file.filename}"
+        with open(file_location, "wb") as f:
+            f.write(await file.read())
+        
+        raw_text = extract_text_from_pdf(file_location)
+        
+        doc_creator = LawDocumentCreator(**DB_CONFIG)
+        
+        doc_creator.add_chapters_and_articles_to_db(raw_text)
+        
+        documents = doc_creator.create_documents_from_db()
+        
+        qdrant_vectors.upsert_documents(documents)
+        
+        # Xóa file tạm
+        os.remove(file_location)
+        
+        return {"status": "success", "filename": file.filename, "documents_count": len(documents)}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+# Health Check
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {"status": "healthy", "message": "Law Chat API is running"}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
