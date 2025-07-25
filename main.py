@@ -56,7 +56,7 @@ VN_LAW_PDF_PATH = "VanBanGoc_52.2014.QH13.pdf"
 DB_CONFIG = {
     "host": os.getenv("DB_HOST", "localhost"),
     "user": os.getenv("DB_USER", "root"),
-    "password": os.getenv("DB_PASSWORD", "hoangducdung"),
+    "password": os.getenv("DB_PASSWORD", ""),
     "database": os.getenv("DB_NAME", "law_db")
 }
 
