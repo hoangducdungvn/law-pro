@@ -14,18 +14,19 @@ from langchain_openai import ChatOpenAI
 from fastapi.middleware.cors import CORSMiddleware
 
 from database import QdrantVT
-from database.chat_history import ChatHistoryManager
 from router import QueryRouter
 from tools import ToolSearch
+from database.chat_history import ChatHistoryManager
 
 from typing_extensions import TypedDict
 from typing import List
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, Request, Form
+from fastapi import FastAPI, UploadFile, File
 from pydantic import BaseModel
 from typing import Optional
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi import HTTPException, Request, Form
 
 from pprint import pprint
 from database.create_docs import extract_text_from_pdf, LawDocumentCreator
@@ -35,7 +36,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:8080"],  # Cho phép origin của giao diện
+    allow_origins=["http://localhost:5173"],  # Cho phép origin của giao diện
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -50,7 +51,8 @@ LLM_MODEL = "sonar-pro"
 COLLECTION_NAME = "law_collection"
 VN_LAW_PDF_PATH = "VanBanGoc_52.2014.QH13.pdf"
 
-### Khởi tạo Chat History Manager ###
+
+### Khởi tạo ChatHistoryManager ###
 DB_CONFIG = {
     "host": os.getenv("DB_HOST", "localhost"),
     "user": os.getenv("DB_USER", "root"),
@@ -69,7 +71,7 @@ collection = COLLECTION_NAME
 qdrant_vectors = QdrantVT(collectionName=collection, embeddingModel=embeddings, SparseModel=sparse)
 # llm = ChatGroq(model_name=LLM_MODEL, api_key="")
 llm = ChatOpenAI(
-    api_key="pplx-",
+    api_key="",
     base_url="https://api.perplexity.ai",
     model_name = LLM_MODEL
 )
@@ -93,13 +95,13 @@ rerank_retriever = ContextualCompressionRetriever(
 ### FUNCTIONS ###
 class GraphState(TypedDict):
     """
-    Trạng thái của đồ thị
+    Trạng thái của đồ thị
 
     Attributes:
-        question: câu hỏi
+        question: câu hỏi
         generation: LLM generation
-        documents: danh sách các văn bản
-        answer: câu trả lời
+        documents: danh sách các văn bản
+        answer: câu trả lời
     """
     question: str
     instruction: str
@@ -147,18 +149,6 @@ def retrieve(state):
     
     print("---RETRIEVE COMPLETED---")
     return {"documents": text, "question": question}
-
-# def retrieve(state):
-
-#     print("---RETRIEVE---")
-#     instruction = state["instruction"]
-#     question = state["question"]    
-#     documents = rerank_retriever.invoke(instruction)
-#     print(documents)
-#     text = ""
-#     for i,result in enumerate(documents):
-#         text += f"{i+1}. {result.metadata['chapter_number']} - {result.metadata['chapter_title']} - {result.metadata['article_number']}\n {result.page_content} \n"
-#     return {"documents": text, "question": question}
 
 def wiki_search(state):
 
@@ -221,7 +211,6 @@ def preprocess_query(state):
     return {
         "instruction": response.content
     }
-
 def chatbot(state):
     # Prompt cải tiến cho tác vụ RAG
     prompt = f"""
@@ -242,7 +231,7 @@ def chatbot(state):
     response = llm.invoke(prompt)
     
     return {
-        "answer": response.content
+        "answer": [response]
     }
 
 
@@ -282,7 +271,7 @@ except Exception as e:
     print(f"\nKhông thể tạo đồ thị: {str(e)}")
 
 
-# Pydantic models
+# endpoints
 class UserCreate(BaseModel):
     username: str
     email: Optional[str] = None
@@ -303,7 +292,6 @@ class MessageSearch(BaseModel):
     user_id: str
     query: str
 
-# User Management Endpoints
 @app.post("/api/users")
 async def create_user(user: UserCreate):
     """Tạo user mới"""
@@ -316,19 +304,6 @@ async def create_user(user: UserCreate):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.get("/api/users/{username}")
-async def get_user(username: str):
-    """Lấy thông tin user theo username"""
-    try:
-        user = chat_history_manager.get_user_by_username(username)
-        if user:
-            return {"status": "success", "user": user}
-        else:
-            raise HTTPException(status_code=404, detail="User không tồn tại")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-# Session Management Endpoints
 @app.post("/api/sessions")
 async def create_session(session: SessionCreate):
     """Tạo session mới"""
@@ -382,7 +357,7 @@ async def delete_session(session_id: str):
             raise HTTPException(status_code=400, detail="Không thể xóa session")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
+    
 # Chat Endpoints
 @app.post("/api/chat")
 async def chat(inputs: QuestionInput):
@@ -406,8 +381,7 @@ async def chat(inputs: QuestionInput):
         
         # Lưu câu trả lời của assistant
         assistant_message_id = chat_history_manager.add_message(
-            session_id, "assistant", answer, 
-            metadata={"processing_results": results}
+            session_id, "assistant", answer
         )
         
         # Tự động cập nhật title session nếu đây là tin nhắn đầu tiên
@@ -422,10 +396,13 @@ async def chat(inputs: QuestionInput):
             "session_id": session_id,
             "answer": answer,
             "user_message_id": user_message_id,
-            "assistant_message_id": assistant_message_id,
-            "results": results
+            "assistant_message_id": assistant_message_id
         }
     except Exception as e:
+        print(f"Error in chat endpoint: {str(e)}")
+        print(f"Error type: {type(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/sessions/{session_id}/context")
@@ -445,7 +422,7 @@ async def get_session_statistics(session_id: str):
         return {"status": "success", "statistics": stats}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-
+    
 # Search Endpoints
 @app.post("/api/search/messages")
 async def search_messages(search: MessageSearch):
@@ -456,38 +433,48 @@ async def search_messages(search: MessageSearch):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# @app.post("/api/chat")
+# async def chat(inputs: QuestionInput):
+#     # results = []
+    
+#     # # Giả sử bạn đã có `app.stream()` cho phép lấy các output từ câu hỏi.
+#     # for output in graph.invoke({"question": inputs.question}):
+#     #     output_result = {}
+#     #     for key, value in output.items():
+#     #         output_result[key] = value
+#     #     results.append(output_result)
+#     results = graph.invoke({"question": inputs.question})
+#     answer = results.get('answer','')
+#     #save_chat_history(inputs.user_id, inputs.question, answer)
+#     return {"results": results}
 
+# PDF Upload Endpoint
 @app.post("/api/upload_pdf")
 async def upload_pdf(file: UploadFile = File(...)):
-    """Upload và xử lý PDF"""
-    try:
-        file_location = f"temp_{file.filename}"
-        with open(file_location, "wb") as f:
-            f.write(await file.read())
-        
-        raw_text = extract_text_from_pdf(file_location)
-        
-        doc_creator = LawDocumentCreator(**DB_CONFIG)
-        
-        doc_creator.add_chapters_and_articles_to_db(raw_text)
-        
-        documents = doc_creator.create_documents_from_db()
-        
-        qdrant_vectors.upsert_documents(documents)
-        
-        # Xóa file tạm
-        os.remove(file_location)
-        
-        return {"status": "success", "filename": file.filename, "documents_count": len(documents)}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    # Lưu file tạm thời
+    file_location = f"temp_{file.filename}"
+    with open(file_location, "wb") as f:
+        f.write(await file.read())
+    # 1. Trích xuất text
+    raw_text = extract_text_from_pdf(file_location)
+    # 2. Khởi tạo class thao tác DB
+    db_config = {
+        "host": "localhost",
+        "user": "root",
+        "password": "hoangducdung",
+        "database": "law_db"
+    }
+    doc_creator = LawDocumentCreator(**db_config)
+    # 3. Lưu vào MySQL
+    doc_creator.add_chapters_and_articles_to_db(raw_text)
+    # 4. Tạo Document từ MySQL
+    documents = doc_creator.create_documents_from_db()
+    # 5. Upsert vào Qdrant
+    qdrant_vectors.upsert_documents(documents)
+    return {"status": "success", "filename": file.filename}
 
 # Health Check
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "message": "Law Chat API is running"}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
