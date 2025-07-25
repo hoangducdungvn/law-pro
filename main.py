@@ -108,16 +108,57 @@ class GraphState(TypedDict):
     answer: str
 
 def retrieve(state):
-
     print("---RETRIEVE---")
     instruction = state["instruction"]
     question = state["question"]    
     documents = rerank_retriever.invoke(instruction)
-    print(documents)
+    print(f"Number of documents retrieved: {len(documents)}")
+    
     text = ""
-    for i,result in enumerate(documents):
-        text += f"{i+1}. {result.metadata['chapter_number']} - {result.metadata['chapter_title']} - {result.metadata['article_number']}\n {result.page_content} \n"
+    
+    for i, result in enumerate(documents):
+        try:
+            print(f"Document {i} metadata keys: {list(result.metadata.keys())}")
+            print(f"Document {i} metadata: {result.metadata}")
+            
+            # Safely get metadata with default values using .get()
+            chapter_number = result.metadata.get('chapter_number', 'N/A')
+            chapter_title = result.metadata.get('chapter_title', 'N/A')
+            article_number = result.metadata.get('article_number', 'N/A')
+            
+            print(f"Extracted - Chapter: {chapter_number}, Title: {chapter_title}, Article: {article_number}")
+            
+            # Format the text with safe metadata access
+            if chapter_number != 'N/A' and chapter_title != 'N/A' and article_number != 'N/A':
+                # Full metadata available
+                text += f"{i+1}. {chapter_number} - {chapter_title} - {article_number}\n {result.page_content}\n\n"
+            else:
+                # Missing some metadata, use a simpler format
+                text += f"{i+1}. {article_number if article_number != 'N/A' else 'Điều không xác định'}\n {result.page_content}\n\n"
+                
+        except Exception as e:
+            print(f"Error processing document {i}: {str(e)}")
+            print(f"Document type: {type(result)}")
+            print(f"Has metadata attr: {hasattr(result, 'metadata')}")
+            if hasattr(result, 'metadata'):
+                print(f"Metadata type: {type(result.metadata)}")
+            # Fallback to simple format
+            text += f"{i+1}. Nội dung pháp lý\n {result.page_content}\n\n"
+    
+    print("---RETRIEVE COMPLETED---")
     return {"documents": text, "question": question}
+
+# def retrieve(state):
+
+#     print("---RETRIEVE---")
+#     instruction = state["instruction"]
+#     question = state["question"]    
+#     documents = rerank_retriever.invoke(instruction)
+#     print(documents)
+#     text = ""
+#     for i,result in enumerate(documents):
+#         text += f"{i+1}. {result.metadata['chapter_number']} - {result.metadata['chapter_title']} - {result.metadata['article_number']}\n {result.page_content} \n"
+#     return {"documents": text, "question": question}
 
 def wiki_search(state):
 
