@@ -303,6 +303,18 @@ async def create_user(user: UserCreate):
             raise HTTPException(status_code=400, detail="Không thể tạo user")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+@app.get("/api/users/{username}")
+async def get_user_by_username(username: str):
+    """Lấy thông tin user theo username"""
+    try:
+        user = chat_history_manager.get_user_by_username(username)
+        if user:
+            return {"status": "success", "user": user}
+        else:
+            raise HTTPException(status_code=404, detail="User not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/sessions")
 async def create_session(session: SessionCreate):
