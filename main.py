@@ -56,7 +56,7 @@ VN_LAW_PDF_PATH = "VanBanGoc_52.2014.QH13.pdf"
 DB_CONFIG = {
     "host": os.getenv("DB_HOST", "localhost"),
     "user": os.getenv("DB_USER", "root"),
-    "password": os.getenv("DB_PASSWORD", ""),
+    "password": os.getenv("DB_PASSWORD", "hoangducdung"),
     "database": os.getenv("DB_NAME", "law_db")
 }
 
@@ -98,12 +98,15 @@ class GraphState(TypedDict):
     Trạng thái của đồ thị
 
     Attributes:
-        question: câu hỏi
+        question: câu hỏi
+        session_id: ID của session để lấy context
+        instruction: hướng dẫn đã được xử lý
         generation: LLM generation
-        documents: danh sách các văn bản
-        answer: câu trả lời
+        documents: danh sách các văn bản
+        answer: câu trả lời
     """
     question: str
+    session_id: str  # Thêm field này
     instruction: str
     generation: str
     documents: List[str]
@@ -188,20 +191,45 @@ def preprocess_query(state):
     # Đây là câu hỏi dành cho bạn: {state['question']}
     # """
 
+    session_id = state.get('session_id')
+    conversation_context = ""
+
+    if session_id:
+        try:
+            # Lấy 5 tin nhắn gần nhất để có context
+            context_messages = chat_history_manager.get_conversation_context(session_id, 5)
+            
+            if context_messages:
+                conversation_context = "\n--- NGỮ CẢNH CUỘC TRÒ CHUYỆN TRƯỚC ĐÓ ---\n"
+                for msg in context_messages[:-1]:  # Loại bỏ tin nhắn hiện tại
+                    role = "👤 Người dùng" if msg['role'] == 'user' else "🤖 Trợ lý"
+                    conversation_context += f"{role}: {msg['content'][:200]}{'...' if len(msg['content']) > 200 else ''}\n"
+                conversation_context += "--- KẾT THÚC NGỮ CẢNH ---\n\n"
+        except Exception as e:
+            print(f"Lỗi khi lấy context: {e}")
+            conversation_context = ""
+
     prompt = f"""
     Bạn là chuyên gia Luật Hôn nhân và Gia đình Việt Nam 2014. Khi nhận được một tình huống hoặc câu hỏi, hãy:
-    1. Tóm tắt nội dung chính của tình huống.
-    2. Trích xuất các từ khóa quan trọng từ tình huống và 5 từ khóa tương tự cùng ý nghĩa
-    3. Liệt kê các điều luật có thể áp dụng.
 
-    Chỉ trả lời với 3 mục trên, không giải thích thêm.
+    Nhiệm vụ của bạn:
+    1. **Đọc ngữ cảnh cuộc trò chuyện** (nếu có) để hiểu mạch câu chuyện và các vấn đề đã được thảo luận.
+    2. **Phân tích câu hỏi hiện tại** trong bối cảnh của cuộc trò chuyện.
+    3. **Tóm tắt nội dung chính** của tình huống (bao gồm cả context trước đó nếu liên quan).
+    4. **Trích xuất từ khóa quan trọng** từ tình huống và 5 từ khóa tương tự cùng ý nghĩa.
+    5. **Liệt kê các điều luật** có thể áp dụng.
+
+    Chỉ trả lời với 3 mục cuối (tóm tắt, từ khóa, điều luật), không giải thích thêm.
 
     Ví dụ:
     Tình huống: "Hai vợ chồng đồng ý ly hôn và đã thỏa thuận xong việc chia tài sản."
     Trả lời:
+    Tóm tắt: Thuận tình ly hôn, đã thỏa thuận chia tài sản.
     Từ khóa: Thuận tình ly hôn, chia tài sản, ly hôn, thỏa thuận, tài sản.
     Điều luật: Điều 55. Thuận tình ly hôn.
 
+    Đây là ngữ cảnh:
+    {conversation_context}
     Đây là câu hỏi dành cho bạn: {state['question']}
     """
 
@@ -212,15 +240,36 @@ def preprocess_query(state):
         "instruction": response.content
     }
 def chatbot(state):
+
+    session_id = state.get('session_id')
+    conversation_context = ""
+
+    if session_id:
+        try:
+            # Lấy 5 tin nhắn gần nhất để có context
+            context_messages = chat_history_manager.get_conversation_context(session_id, 5)
+            
+            if context_messages:
+                conversation_context = "\n--- NGỮ CẢNH CUỘC TRÒ CHUYỆN TRƯỚC ĐÓ ---\n"
+                for msg in context_messages[:-1]:  # Loại bỏ tin nhắn hiện tại
+                    role = "👤 Người dùng" if msg['role'] == 'user' else "🤖 Trợ lý"
+                    conversation_context += f"{role}: {msg['content'][:200]}{'...' if len(msg['content']) > 200 else ''}\n"
+                conversation_context += "--- KẾT THÚC NGỮ CẢNH ---\n\n"
+        except Exception as e:
+            print(f"Lỗi khi lấy context: {e}")
+            conversation_context = ""
+
     # Prompt cải tiến cho tác vụ RAG
     prompt = f"""
     Bạn là một trợ lý ảo thông minh, chuyên sâu về Luật hôn nhân và gia đình Việt Nam. 
     Bạn có khả năng truy cập vào các tài liệu pháp lý liên quan để trả lời câu hỏi một cách chính xác và đầy đủ nhất.
 
     Dưới đây là tài liệu pháp lý mà bạn có thể tham khảo để trả lời câu hỏi. 
-    Vui lòng phân tích câu hỏi và sử dụng thông tin từ tài liệu để cung cấp câu trả lời rõ ràng và chính xác.
+    Vui lòng phân tích context, câu hỏi và sử dụng thông tin từ tài liệu để cung cấp câu trả lời rõ ràng và chính xác.
 
     Tài liệu pháp lý: {state['documents']}
+
+    {conversation_context}
 
     Câu hỏi: {state['question']}
 
@@ -303,7 +352,7 @@ async def create_user(user: UserCreate):
             raise HTTPException(status_code=400, detail="Không thể tạo user")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
+
 @app.get("/api/users/{username}")
 async def get_user_by_username(username: str):
     """Lấy thông tin user theo username"""
@@ -316,6 +365,15 @@ async def get_user_by_username(username: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/users/{user_id}/sessions")
+async def get_user_sessions(user_id: str, limit: int = 50):
+    """Lấy danh sách sessions của user"""
+    try:
+        sessions = chat_history_manager.get_user_sessions(user_id, limit)
+        return {"status": "success", "sessions": sessions}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    
 @app.post("/api/sessions")
 async def create_session(session: SessionCreate):
     """Tạo session mới"""
@@ -325,15 +383,6 @@ async def create_session(session: SessionCreate):
             return {"status": "success", "session_id": session_id}
         else:
             raise HTTPException(status_code=400, detail="Không thể tạo session")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/api/users/{user_id}/sessions")
-async def get_user_sessions(user_id: str, limit: int = 50):
-    """Lấy danh sách sessions của user"""
-    try:
-        sessions = chat_history_manager.get_user_sessions(user_id, limit)
-        return {"status": "success", "sessions": sessions}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -381,21 +430,64 @@ async def chat(inputs: QuestionInput):
             session_id = chat_history_manager.create_session(inputs.user_id, "New Chat")
             if not session_id:
                 raise HTTPException(status_code=400, detail="Không thể tạo session")
-        
+
+        # Lấy conversation context hiện tại (để có thể sử dụng trong tương lai)
+        conversation_context = chat_history_manager.get_conversation_context(session_id, 10)
+
         # Lưu câu hỏi của user
         user_message_id = chat_history_manager.add_message(
             session_id, "user", inputs.question
         )
         
         # Xử lý câu hỏi với graph
-        results = graph.invoke({"question": inputs.question})
-        answer = results.get('answer', '')
+        results = graph.invoke({
+            "question": inputs.question,
+            "session_id": session_id
+        })
+        #answer = results.get('answer', '')
+
+        raw_answer = results.get('answer', '')
+        if isinstance(raw_answer, list) and len(raw_answer) > 0:
+            # Nếu answer là list, lấy phần tử đầu tiên
+            answer_obj = raw_answer[0]
+            if hasattr(answer_obj, 'content'):
+                # Nếu là AIMessage, lấy content
+                answer = answer_obj.content
+            else:
+                answer = str(answer_obj)
+        elif hasattr(raw_answer, 'content'):
+            # Nếu trực tiếp là AIMessage
+            answer = raw_answer.content
+        else:
+            # Fallback to string conversion
+            answer = str(raw_answer)
+        
+        print(f"[DEBUG] Raw answer type: {type(raw_answer)}")
+        print(f"[DEBUG] Processed answer: {answer[:100]}...")
         
         # Lưu câu trả lời của assistant
         assistant_message_id = chat_history_manager.add_message(
             session_id, "assistant", answer
         )
+
+        from datetime import datetime
+
+        context_metadata = {
+            "last_question": inputs.question,
+            "last_answer": answer[:500] + "..." if len(answer) > 500 else answer,
+            "conversation_length": len(conversation_context) + 2,
+            "timestamp": datetime.now().isoformat(),
+            "user_id": inputs.user_id,
+            "processing_results": {
+                #"route_used": "vectorstore" if "vectorstore" in str(graph) else "wiki_search",
+                "has_documents": "documents" in results,
+                "result_keys": list(results.keys()) if isinstance(results, dict) else []
+            }
+        }
         
+        context_saved = chat_history_manager.save_session_context(session_id, context_metadata)
+        print(f"Context saved: {context_saved}")
+
         # Tự động cập nhật title session nếu đây là tin nhắn đầu tiên
         session_messages = chat_history_manager.get_session_messages(session_id, 5)
         if len(session_messages) == 2:  # Chỉ có 2 tin nhắn (user + assistant)
@@ -408,7 +500,9 @@ async def chat(inputs: QuestionInput):
             "session_id": session_id,
             "answer": answer,
             "user_message_id": user_message_id,
-            "assistant_message_id": assistant_message_id
+            "assistant_message_id": assistant_message_id,
+            "context_saved": context_saved,
+            "conversation_context_lenght": len(conversation_context),
         }
     except Exception as e:
         print(f"Error in chat endpoint: {str(e)}")
@@ -425,6 +519,18 @@ async def get_conversation_context(session_id: str, last_n_messages: int = 10):
         return {"status": "success", "context": context}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+@app.post("/api/sessions/{session_id}/save_context")
+async def save_session_context_endpoint(session_id: str, context_data: dict):
+    """Test endpoint để lưu context"""
+    try:
+        success = chat_history_manager.save_session_context(session_id, context_data)
+        if success:
+            return {"status": "success", "message": "Context saved"}
+        else:
+            return {"status": "error", "message": "Failed to save context"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 @app.get("/api/sessions/{session_id}/statistics")
 async def get_session_statistics(session_id: str):

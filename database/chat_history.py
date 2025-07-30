@@ -302,6 +302,8 @@ class ChatHistoryManager:
     
     def save_session_context(self, session_id: str, context_data: Dict) -> bool:
         """Lưu context của session"""
+        print(f"[DEBUG] Attempting to save context for session: {session_id}")
+        print(f"[DEBUG] Context data keys: {list(context_data.keys()) if context_data else 'None'}")
         db = self.connect_to_db()
         if not db:
             return False
@@ -309,32 +311,52 @@ class ChatHistoryManager:
         cursor = db.cursor()
         
         try:
+
+            cursor.execute("SELECT id FROM chat_sessions WHERE id = %s", (session_id,))
+            session_exists = cursor.fetchone()
+            if not session_exists:
+                print(f"[ERROR] Session {session_id} does not exist")
+                return False
+
             # Kiểm tra xem đã có context chưa
             cursor.execute("SELECT id FROM session_context WHERE session_id = %s", (session_id,))
             existing = cursor.fetchone()
+
+            json_data = json.dumps(context_data, ensure_ascii=False, indent=2)
+            print(f"[DEBUG] JSON data length: {len(json_data)}")
             
             if existing:
                 # Update
                 cursor.execute(
-                    "UPDATE session_context SET context_data = %s WHERE session_id = %s",
-                    (json.dumps(context_data), session_id)
+                    "UPDATE session_context SET context_data = %s, updated_at = CURRENT_TIMESTAMP WHERE session_id = %s",
+                    (json_data, session_id)
                 )
+                print(f"[SUCCESS] Updated existing context for session {session_id}")
             else:
                 # Insert
                 context_id = str(uuid.uuid4())
                 cursor.execute(
                     "INSERT INTO session_context (id, session_id, context_data) VALUES (%s, %s, %s)",
-                    (context_id, session_id, json.dumps(context_data))
+                    (context_id, session_id, json_data)
                 )
-            
+                print(f"[SUCCESS] Inserted new context with id: {context_id}")
+        
             db.commit()
+            print("[SUCCESS] Context transaction committed")
             return True
+        
         except MySQLdb.Error as e:
-            print(f"Lỗi lưu context: {e}")
+            print(f"[ERROR] MySQL Error: {e}")
+            db.rollback()
+            return False
+        except Exception as e:
+            print(f"[ERROR] General Error: {e}")
+            db.rollback()
             return False
         finally:
             cursor.close()
             db.close()
+            print("[DEBUG] Database connection closed")
     
     def get_session_context(self, session_id: str) -> Optional[Dict]:
         """Lấy context của session"""
