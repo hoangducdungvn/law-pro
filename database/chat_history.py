@@ -434,3 +434,4 @@ class ChatHistoryManager:
         finally:
             cursor.close()
             db.close()
+

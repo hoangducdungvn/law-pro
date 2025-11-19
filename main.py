@@ -24,13 +24,15 @@ from typing import List
 from fastapi import FastAPI, UploadFile, File
 from pydantic import BaseModel
 from typing import Optional
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi import HTTPException, Request, Form
 
 from pprint import pprint
 from database.create_docs import extract_text_from_pdf, LawDocumentCreator
 import os
+import json
+import asyncio
 
 app = FastAPI()
 
@@ -70,12 +72,39 @@ collection = COLLECTION_NAME
 ###  ###
 qdrant_vectors = QdrantVT(collectionName=collection, embeddingModel=embeddings, SparseModel=sparse)
 # llm = ChatGroq(model_name=LLM_MODEL, api_key="")
-llm = ChatOpenAI(
+# llm = ChatOpenAI(
+#     api_key="",
+#     base_url="https://api.perplexity.ai",
+#     model_name = LLM_MODEL,
+#     streaming=True
+# )
+# query_router = QueryRouter(llm=llm)
+# --- Model cấu hình ---
+# Dùng .env thay vì hardcode key
+
+
+from langchain_openai import ChatOpenAI
+
+llm_nostream = ChatOpenAI(
     api_key="",
     base_url="https://api.perplexity.ai",
-    model_name = LLM_MODEL
+    model_name=LLM_MODEL,
+    streaming=False,
+    temperature=0,
 )
-query_router = QueryRouter(llm=llm)
+
+llm_stream = ChatOpenAI(
+    api_key="",
+    base_url="https://api.perplexity.ai",
+    model_name=LLM_MODEL,
+    streaming=True,
+    temperature=0,
+)
+
+
+# QueryRouter phải nhận model non-stream
+query_router = QueryRouter(llm=llm_nostream)
+
 tool = ToolSearch()
 wiki_tool = tool.wiki
 documents = qdrant_vectors.load_documents(pdf_path=VN_LAW_PDF_PATH)
@@ -175,22 +204,6 @@ def route_question(state):
         return "vectorstore"
 
 def preprocess_query(state):
-    # prompt = f"""
-    # Bạn là chuyên gia Luật Hôn nhân và Gia đình Việt Nam 2014. Khi nhận được một tình huống hoặc câu hỏi, hãy:
-    # 1.Tóm tắt nội dung chính của tình huống.
-    # 2.Trích xuất các từ khóa quan trọng.
-    # 3.Liệt kê số điều và tên điều trong luật có thể áp dụng.
-    # Chỉ trả lời với 3 mục trên, không giải thích thêm.
-    # Ví dụ:
-    # Tình huống: "Hai vợ chồng đồng ý ly hôn và đã thỏa thuận xong việc chia tài sản."
-    # Trả lời:
-    # Tóm tắt: Thuận tình ly hôn, đã thỏa thuận chia tài sản.
-    # Từ khóa: Thuận tình ly hôn, chia tài sản.
-    # Điều luật: Điều 55. Thuận tình ly hôn.
-
-    # Đây là câu hỏi dành cho bạn: {state['question']}
-    # """
-
     session_id = state.get('session_id')
     conversation_context = ""
 
@@ -234,11 +247,54 @@ def preprocess_query(state):
     """
 
     
-    response = llm.invoke(prompt)
+    response = llm_stream.invoke(prompt)
     
     return {
         "instruction": response.content
     }
+
+async def chatbot_stream(state):
+    """Chatbot với streaming response"""
+    session_id = state.get('session_id')
+    conversation_context = ""
+
+    if session_id:
+        try:
+            context_messages = chat_history_manager.get_conversation_context(session_id, 5)
+            if context_messages:
+                conversation_context = "\n--- NGỮ CẢNH CUỘC TRÒ CHUYỆN TRƯỚC ĐÓ ---\n"
+                for msg in context_messages[:-1]:
+                    role = "👤 Người dùng" if msg['role'] == 'user' else "🤖 Trợ lý"
+                    content = msg.get('content', '')
+                    conversation_context += f"{role}: {content[:200]}{'...' if len(content) > 200 else ''}\n"
+                conversation_context += "--- KẾT THÚC NGỮ CẢNH ---\n\n"
+        except Exception as e:
+            print(f"Lỗi khi lấy context: {e}")
+            conversation_context = ""
+
+    prompt = f"""
+    Bạn là một trợ lý ảo thông minh, chuyên sâu về Luật hôn nhân và gia đình Việt Nam.
+    Bạn có khả năng truy cập vào các tài liệu pháp lý liên quan để trả lời câu hỏi một cách chính xác và đầy đủ nhất.
+
+    Tài liệu pháp lý: {state.get('documents', '')}
+    {conversation_context}
+    Câu hỏi: {state.get('question', '')}
+
+    Lưu ý: Đảm bảo câu trả lời dựa trên các quy định và điều khoản trong các tài liệu pháp lý.
+    """
+
+    full_response = ""
+    # Dùng stream() hoặc astream() (nếu muốn async thực thụ)
+    for chunk in llm_stream.stream(prompt):
+        text = getattr(chunk, "content", None) or str(chunk)
+        full_response += text
+        yield text
+
+    # Nếu muốn lưu full_response để truy xuất sau:
+    state["answer"] = full_response
+    return  # ❗ KHÔNG return giá trị trong async generator
+
+        
 def chatbot(state):
 
     session_id = state.get('session_id')
@@ -277,7 +333,7 @@ def chatbot(state):
     """
     
     # Gửi prompt và câu hỏi vào LLM để nhận câu trả lời
-    response = llm.invoke(prompt)
+    response = llm_stream.invoke(prompt)
     
     return {
         "answer": [response]
@@ -320,7 +376,7 @@ except Exception as e:
     print(f"\nKhông thể tạo đồ thị: {str(e)}")
 
 
-# endpoints
+# MODELS
 class UserCreate(BaseModel):
     username: str
     email: Optional[str] = None
@@ -340,6 +396,196 @@ class SessionUpdate(BaseModel):
 class MessageSearch(BaseModel):
     user_id: str
     query: str
+
+import json, asyncio, traceback
+from datetime import datetime
+from langchain.schema import Document
+
+async def gen_streaming_response(inputs: QuestionInput):
+    """Hàm tạo response streaming (SSE) an toàn, có log lỗi chi tiết."""
+    # helper: gửi event SSE
+    async def send(evt: dict):
+        try:
+            yield f"data: {json.dumps(evt, ensure_ascii=False)}\n\n"
+        except Exception as e:
+            # nếu serialize lỗi (do value không jsonable) → gửi fallback
+            safe_evt = {k: str(v) for k, v in evt.items()}
+            yield f"data: {json.dumps(safe_evt, ensure_ascii=False)}\n\n"
+
+    try:
+        # --- B1: chuẩn bị session ---
+        session_id = inputs.session_id
+        if not session_id:
+            session_id = chat_history_manager.create_session(inputs.user_id, "New Chat")
+            if not session_id:
+                async for chunk in send({"type": "error", "error": "Không thể tạo session"}):
+                    yield chunk
+                return
+
+        async for chunk in send({"type": "session_id", "session_id": session_id}):
+            yield chunk
+
+        # --- B2: routing nguồn dữ liệu ---
+        question_text = inputs.question
+        try:
+            source = query_router.route_question(question_text)  # pydantic model
+            datasource = getattr(source, "datasource", "vectorstore")
+        except Exception as e:
+            print("[route_question error]", e)
+            datasource = "vectorstore"  # fallback an toàn
+
+        # --- B3: lấy conversation context (dùng cho cả 2 nhánh) ---
+        conversation_context = ""
+        try:
+            context_messages = chat_history_manager.get_conversation_context(session_id, 5)
+            if context_messages:
+                conversation_context = "\n--- NGỮ CẢNH CUỘC TRÒ CHUYỆN TRƯỚC ĐÓ ---\n"
+                for msg in context_messages[:-1]:
+                    role = "👤 Người dùng" if msg.get('role') == 'user' else "🤖 Trợ lý"
+                    content = (msg.get('content') or "")[:200]
+                    conversation_context += f"{role}: {content}{'...' if len(msg.get('content') or '') > 200 else ''}\n"
+                conversation_context += "--- KẾT THÚC NGỮ CẢNH ---\n\n"
+        except Exception as e:
+            print("[context error]", e)
+            conversation_context = ""
+
+        # --- B4: chuẩn bị tài liệu ---
+        documents_text = ""
+        if datasource == "wiki_search":
+            async for chunk in send({"type": "status", "message": "Đang tìm kiếm trên Wikipedia..."}):
+                yield chunk
+            try:
+                wiki_result = wiki_tool.invoke({"query": question_text})  # string expected
+                documents_text = Document(page_content=wiki_result).page_content or ""
+            except Exception as e:
+                tb = traceback.format_exc()
+                print("[wiki_search error]\n", tb)
+                async for chunk in send({"type": "error", "error": f"Wiki search lỗi: {str(e)}"}):
+                    yield chunk
+                # vẫn tiếp tục, nhưng documents_text rỗng
+        else:
+            async for chunk in send({"type": "status", "message": "Đang tìm kiếm trong cơ sở dữ liệu..."}):
+                yield chunk
+
+            preprocess_prompt = f"""
+            Bạn là chuyên gia Luật Hôn nhân và Gia đình Việt Nam 2014.
+            Hãy phân tích ngữ cảnh (nếu có) và câu hỏi để tạo chỉ dẫn/truy vấn tìm tài liệu ngắn gọn, chính xác.
+
+            {conversation_context}
+            Câu hỏi: {question_text}
+            """.strip()
+
+            try:
+                instruction = llm_stream.invoke(preprocess_prompt).content
+            except Exception as e:
+                tb = traceback.format_exc()
+                print("[preprocess llm error]\n", tb)
+                async for chunk in send({"type": "error", "error": f"Lỗi LLM preprocess: {str(e)}"}):
+                    yield chunk
+                instruction = question_text  # fallback
+
+            async for chunk in send({"type": "status", "message": "Retrieving tài liệu..."}):
+                yield chunk
+
+            try:
+                documents = rerank_retriever.invoke(instruction)
+                cnt = len(documents) if hasattr(documents, "__len__") else 0
+                async for chunk in send({"type": "documents_retrieved", "count": cnt}):
+                    yield chunk
+
+                buf = []
+                for i, result in enumerate(documents or []):
+                    try:
+                        md = getattr(result, "metadata", {}) or {}
+                        chapter_number = md.get('chapter_number', 'N/A')
+                        chapter_title  = md.get('chapter_title', 'N/A')
+                        article_number = md.get('article_number', 'N/A')
+                        if chapter_number != 'N/A' and chapter_title != 'N/A' and article_number != 'N/A':
+                            buf.append(f"{i+1}. {chapter_number} - {chapter_title} - {article_number}\n{result.page_content}\n")
+                        else:
+                            label = article_number if article_number != 'N/A' else 'Điều không xác định'
+                            buf.append(f"{i+1}. {label}\n{result.page_content}\n")
+                    except Exception:
+                        buf.append(f"{i+1}. Nội dung pháp lý\n{getattr(result, 'page_content', '')}\n")
+                documents_text = "\n".join(buf)
+            except Exception as e:
+                tb = traceback.format_exc()
+                print("[retriever error]\n", tb)
+                async for chunk in send({"type": "error", "error": f"Lỗi retrieve: {str(e)}"}):
+                    yield chunk
+                documents_text = ""
+
+        # --- B5: stream câu trả lời ---
+        async for chunk in send({"type": "generating", "message": "Đang gen câu trả lời..."}):
+            yield chunk
+
+        final_prompt = f"""
+        Bạn là một trợ lý ảo thông minh, chuyên sâu về Luật hôn nhân và gia đình Việt Nam.
+        Hãy dựa chặt chẽ vào tài liệu pháp lý bên dưới để trả lời rõ ràng, có trích dẫn điều luật khi phù hợp.
+
+        Tài liệu pháp lý:
+        {documents_text}
+
+        {conversation_context}
+        Câu hỏi: {question_text}
+        """.strip()
+
+        full_answer = ""
+        try:
+            # Quan trọng: dùng đúng API streaming
+            for chunk in llm_stream.stream(final_prompt):  # ❗ chỉ stream ở đây
+                text = getattr(chunk, "content", "") or ""
+                if text:
+                    full_answer += text
+                    yield f"data: {json.dumps({'type':'content','content': text}, ensure_ascii=False)}\n\n"
+                    await asyncio.sleep(0.02)  # nhịp cho UI mượt
+        except Exception as e:
+            tb = traceback.format_exc()
+            print("[llm stream error]\n", tb)
+            async for chunk in send({"type": "error", "error": f"Lỗi stream LLM: {str(e)}"}):
+                yield chunk
+
+        # --- B6: lưu lịch sử + metadata ---
+        try:
+            if full_answer.strip():
+                chat_history_manager.add_message(session_id, "assistant", full_answer)
+
+            context_metadata = {
+                "last_question": question_text,
+                "last_answer": full_answer[:500] + "..." if len(full_answer) > 500 else full_answer,
+                "timestamp": datetime.now().isoformat(),
+                "user_id": inputs.user_id,
+            }
+            _ = chat_history_manager.save_session_context(session_id, context_metadata)
+        except Exception as e:
+            print("[save history error]", e)
+
+        async for chunk in send({"type": "completed"}):
+            yield chunk
+
+    except Exception as e:
+        tb = traceback.format_exc()
+        print("[stream outer error]\n", tb)
+        async for chunk in send({"type": "error", "error": f"{str(e) or 'Unknown error'}", "traceback": tb}):
+            yield chunk
+
+
+from fastapi.responses import StreamingResponse
+
+@app.post("/api/chat/stream")
+async def chat_stream(inputs: QuestionInput):
+    # Trả về async generator
+    return StreamingResponse(
+        gen_streaming_response(inputs),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
+    )
+
+
+    return JSONResponse(content=event_generator(), media_type="text/event-stream")
 
 @app.post("/api/users")
 async def create_user(user: UserCreate):
@@ -418,7 +664,10 @@ async def delete_session(session_id: str):
             raise HTTPException(status_code=400, detail="Không thể xóa session")
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-    
+
+
+
+
 # Chat Endpoints
 @app.post("/api/chat")
 async def chat(inputs: QuestionInput):
@@ -596,3 +845,8 @@ async def upload_pdf(file: UploadFile = File(...)):
 async def health_check():
     """Health check endpoint"""
     return {"status": "healthy", "message": "Law Chat API is running"}
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="localhost", port=8000)
