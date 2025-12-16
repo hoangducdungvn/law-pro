@@ -43,6 +43,7 @@ class ChatHistoryManager:
                 id VARCHAR(36) PRIMARY KEY,
                 username VARCHAR(100) UNIQUE NOT NULL,
                 email VARCHAR(100),
+                role VARCHAR(20) DEFAULT 'user',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
             )
@@ -131,6 +132,25 @@ class ChatHistoryManager:
         finally:
             cursor.close()
             db.close()
+
+    def delete_user(self, user_id: str) -> bool:
+        """Xóa người dùng"""
+        db = self.connect_to_db()
+        if not db:
+            return False
+        
+        cursor = db.cursor()
+        try:
+            cursor.execute("DELETE FROM users WHERE id = %s", (user_id,))
+            db.commit()
+            return cursor.rowcount > 0
+        except MySQLdb.Error as e:
+            print(f"Lỗi xóa user: {e}")
+            db.rollback()
+            return False
+        finally:
+            cursor.close()
+            db.close
     
     def create_session(self, user_id: str, title: str = "New Chat") -> str:
         """Tạo session mới"""
@@ -302,8 +322,6 @@ class ChatHistoryManager:
     
     def save_session_context(self, session_id: str, context_data: Dict) -> bool:
         """Lưu context của session"""
-        print(f"[DEBUG] Attempting to save context for session: {session_id}")
-        print(f"[DEBUG] Context data keys: {list(context_data.keys()) if context_data else 'None'}")
         db = self.connect_to_db()
         if not db:
             return False
@@ -311,52 +329,38 @@ class ChatHistoryManager:
         cursor = db.cursor()
         
         try:
-
             cursor.execute("SELECT id FROM chat_sessions WHERE id = %s", (session_id,))
             session_exists = cursor.fetchone()
             if not session_exists:
-                print(f"[ERROR] Session {session_id} does not exist")
                 return False
 
-            # Kiểm tra xem đã có context chưa
             cursor.execute("SELECT id FROM session_context WHERE session_id = %s", (session_id,))
             existing = cursor.fetchone()
 
-            json_data = json.dumps(context_data, ensure_ascii=False, indent=2)
-            print(f"[DEBUG] JSON data length: {len(json_data)}")
+            json_data = json.dumps(context_data, ensure_ascii=False)
             
             if existing:
-                # Update
                 cursor.execute(
                     "UPDATE session_context SET context_data = %s, updated_at = CURRENT_TIMESTAMP WHERE session_id = %s",
                     (json_data, session_id)
                 )
-                print(f"[SUCCESS] Updated existing context for session {session_id}")
             else:
-                # Insert
                 context_id = str(uuid.uuid4())
                 cursor.execute(
                     "INSERT INTO session_context (id, session_id, context_data) VALUES (%s, %s, %s)",
                     (context_id, session_id, json_data)
                 )
-                print(f"[SUCCESS] Inserted new context with id: {context_id}")
         
             db.commit()
-            print("[SUCCESS] Context transaction committed")
             return True
         
         except MySQLdb.Error as e:
-            print(f"[ERROR] MySQL Error: {e}")
-            db.rollback()
-            return False
-        except Exception as e:
-            print(f"[ERROR] General Error: {e}")
+            print(f"Lỗi save context: {e}")
             db.rollback()
             return False
         finally:
             cursor.close()
             db.close()
-            print("[DEBUG] Database connection closed")
     
     def get_session_context(self, session_id: str) -> Optional[Dict]:
         """Lấy context của session"""
@@ -435,3 +439,91 @@ class ChatHistoryManager:
             cursor.close()
             db.close()
 
+    # --- CÁC HÀM MỚI CHO ADMIN DASHBOARD ---
+    
+    def get_system_stats(self) -> Dict:
+        """Lấy thống kê toàn hệ thống cho Admin"""
+        db = self.connect_to_db()
+        if not db:
+            return {}
+        
+        cursor = db.cursor(MySQLdb.cursors.DictCursor)
+        try:
+            stats = {}
+            
+            # Tổng user
+            cursor.execute("SELECT COUNT(*) as total_users FROM users")
+            stats['total_users'] = cursor.fetchone()['total_users']
+            
+            # Tổng session
+            cursor.execute("SELECT COUNT(*) as total_sessions FROM chat_sessions")
+            stats['total_sessions'] = cursor.fetchone()['total_sessions']
+            
+            # Session hôm nay
+            cursor.execute("SELECT COUNT(*) as today_sessions FROM chat_sessions WHERE DATE(created_at) = CURDATE()")
+            stats['today_sessions'] = cursor.fetchone()['today_sessions']
+            
+            # Thống kê số lượng điều luật (coi như documents)
+            try:
+                cursor.execute("SELECT COUNT(*) as total_articles FROM articles")
+                stats['total_documents'] = cursor.fetchone()['total_articles']
+            except:
+                stats['total_documents'] = 0
+            
+            # Trạng thái hệ thống
+            stats['system_status'] = "Online"
+                
+            return stats
+        except MySQLdb.Error as e:
+            print(f"Lỗi lấy system stats: {e}")
+            return {}
+        finally:
+            cursor.close()
+            db.close()
+
+    def get_all_users_activity(self, limit: int = 20) -> List[Dict]:
+        """Lấy danh sách user và hoạt động gần đây"""
+        db = self.connect_to_db()
+        if not db:
+            return []
+            
+        cursor = db.cursor(MySQLdb.cursors.DictCursor)
+        try:
+            query = """
+                SELECT 
+                    u.id,
+                    u.username,
+                    MAX(s.updated_at) as last_active,
+                    COUNT(s.id) as sessions
+                FROM users u
+                LEFT JOIN chat_sessions s ON u.id = s.user_id
+                GROUP BY u.id, u.username
+                ORDER BY last_active DESC
+                LIMIT %s
+            """
+            cursor.execute(query, (limit,))
+            users = cursor.fetchall()
+            
+            # Format datetime
+            for user in users:
+                if user['last_active']:
+                    # Tính khoảng thời gian (ví dụ: "2 giờ trước")
+                    diff = datetime.now() - user['last_active']
+                    if diff.days > 0:
+                        user['last_active'] = f"{diff.days} ngày trước"
+                    elif diff.seconds > 3600:
+                        user['last_active'] = f"{diff.seconds // 3600} giờ trước"
+                    elif diff.seconds > 60:
+                        user['last_active'] = f"{diff.seconds // 60} phút trước"
+                    else:
+                        user['last_active'] = "Vừa xong"
+                else:
+                    user['last_active'] = "Chưa hoạt động"
+                    
+            return users
+        except MySQLdb.Error as e:
+            print(f"Lỗi lấy user activity: {e}")
+            return []
+        finally:
+            cursor.close()
+            db.close()
